@@ -1,0 +1,73 @@
+//@version=5
+indicator("Multi-Bar Support", overlay=true)
+
+lookAhead = input.int(5, "Look-ahead Bars", minval=1)
+leftSearch = input.int(5, "Max Left Search", minval=1)
+
+var float supportLevel = na
+var bool supportBar = false
+
+// offset for plotting since we confirm after lookAhead bars
+offsetPlot = -lookAhead
+
+isValidSupport(index) =>
+    l1 = low[index]
+    h1 = high[index]
+
+    // 1. no-undercut in next lookAhead bars
+    undercut = false
+    for i = 0 to lookAhead - 1
+        if low[index - i] < l1
+            undercut := true
+            break
+    if undercut
+        [false, na]
+    else
+        // 2. find left neighbor with low > L1
+        l2 = na
+        h2 = na
+        for i = index + 1 to index + leftSearch
+            if i < bar_index and low[i] > l1
+                l2 := low[i]
+                h2 := high[i]
+                break
+        if na(l2)
+            [false, na]
+        else
+            // 3. find right neighbor with low > L1
+            l3 = na
+            h3 = na
+            for i = index - 1 to index - lookAhead by -1
+                if i >= 0 and low[i] > l1
+                    l3 := low[i]
+                    h3 := high[i]
+                    break
+            if na(l3)
+                [false, na]
+            else
+                case1 = l1 < l2 and l1 < l3 and h1 < h2 and h1 < h3
+                case2Trig = l1 < l2 and l1 < l3 and h1 < h2 and h1 >= h3
+                case3Trig = l1 < l2 and l1 >= l3
+                if case1
+                    [true, l1]
+                else if case2Trig or case3Trig
+                    maxH = case3Trig ? math.max(h1, h3) : h1
+                    confirm = false
+                    for i = index - 1 to index - lookAhead by -1
+                        if low[i] < l1
+                            confirm := false
+                            break
+                        if high[i] > maxH and low[i] >= l1
+                            confirm := true
+                            break
+                    [confirm, l1]
+                else
+                    [false, na]
+
+// Evaluate candidate bar lookAhead bars back
+barIndex = lookAhead
+
+[result, level] = isValidSupport(barIndex)
+if result
+    plotshape(true, offset = offsetPlot, location=location.belowbar, style=shape.triangleup, color=color.green, size=size.tiny)
+    plot(level, "Support", color=color.new(color.green, 50), style=plot.style_stepline, offset=offsetPlot)
