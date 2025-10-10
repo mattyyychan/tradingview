@@ -4,7 +4,10 @@ import datetime as dt
 import os
 from typing import List
 
-import pandas as pd
+import sys
+
+# Ensure local src is importable when running as script
+sys.path.insert(0, "/workspace/src")
 
 from volsurf.providers.polygon import PolygonOptionsProvider
 from volsurf.surface.builder import SurfaceBuilder, year_to_date_dates
@@ -70,7 +73,7 @@ def main() -> None:
     provider = PolygonOptionsProvider("NVDA")
     builder = SurfaceBuilder(provider)
 
-    all_frames = []
+    total_rows = 0
     rights = [r.strip().upper() for r in args.rights.split(",") if r.strip()]
 
     for d in dates:
@@ -88,21 +91,46 @@ def main() -> None:
         day_quotes = []
         for right in rights:
             day_quotes.extend(builder.build_quotes_for_date(d, expirations, strikes, right))
-        df = builder.compute_iv_surface(d, day_quotes)
-        if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])  # ensure proper dtype
-            df["expiration"] = pd.to_datetime(df["expiration"])  # proper dtype
-            all_frames.append(df)
+        rows = builder.compute_iv_surface_rows(d, day_quotes)
+        if rows:
+            # accumulate daily and write append-style by reading existing and concatenating in memory could be heavy;
+            # instead we will collect all then write once outside the loop to a single parquet
+            total_rows += len(rows)
+            # buffer rows on disk per-day then merge at end
+            tmp_path = f"/workspace/data/surfaces/_tmp_nvda_{d.isoformat()}.parquet"
+            builder.save_surface_rows(rows, tmp_path)
 
-    if not all_frames:
+    if total_rows == 0:
         print("No data collected. Check API key or parameters.")
         return
     out_path = args.out
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    final_df = pd.concat(all_frames, ignore_index=True)
-    final_df.sort_values(["date", "tenor_days", "strike"], inplace=True)
-    final_df.to_parquet(out_path, index=False)
-    print(f"Saved {len(final_df)} rows to {out_path}")
+    # Merge temp parquet files
+    import pyarrow.parquet as pq
+    import pyarrow as pa
+    tmp_files = sorted(f for f in os.listdir("/workspace/data/surfaces") if f.startswith("_tmp_nvda_") and f.endswith(".parquet"))
+    tables = [pq.read_table(os.path.join("/workspace/data/surfaces", f)) for f in tmp_files]
+    if not tables:
+        print("No temp files found despite row count.")
+        return
+    table = pa.concat_tables(tables, promote=True)
+    # sort by date, tenor, strike
+    import pyarrow.compute as pc
+    sort_keys = [
+        ("date", "ascending"),
+        ("tenor_days", "ascending"),
+        ("strike", "ascending"),
+    ]
+    indices = pc.sort_indices(table, sort_keys=sort_keys)
+    table = pc.take(table, indices)
+    pq.write_table(table, out_path)
+    # cleanup temp files
+    for f in tmp_files:
+        try:
+            os.remove(os.path.join("/workspace/data/surfaces", f))
+        except Exception:
+            pass
+    print(f"Saved {table.num_rows} rows to {out_path}")
 
 
 if __name__ == "__main__":

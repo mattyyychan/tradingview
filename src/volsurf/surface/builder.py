@@ -1,8 +1,9 @@
 import datetime as dt
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Dict, Any
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from volsurf.utils.iv import implied_volatility_newton
 
@@ -47,13 +48,14 @@ class SurfaceBuilder:
                 quotes.append(Quote(date=date, expiration=expiry, strike=float(strike), right=right[0].upper(), mark=mark, open_interest=oi))
         return quotes
 
-    def compute_iv_surface(self, date: dt.date, quotes: List[Quote]) -> pd.DataFrame:
+    def compute_iv_surface_rows(self, date: dt.date, quotes: List[Quote]) -> List[Dict[str, Any]]:
         s = self.provider.get_underlying_close(date)
         if s is None:
-            return pd.DataFrame()
-        rows = []
+            return []
+        rows: List[Dict[str, Any]] = []
         for q in quotes:
-            t = max(0.0, (q.expiration - date).days) / 365.25
+            tenor_days = (q.expiration - date).days
+            t = max(0.0, tenor_days) / 365.25
             if t <= 0:
                 continue
             is_call = q.right.upper().startswith("C")
@@ -63,22 +65,32 @@ class SurfaceBuilder:
             rows.append({
                 "date": date,
                 "expiration": q.expiration,
-                "tenor_days": (q.expiration - date).days,
-                "strike": q.strike,
-                "moneyness": q.strike / s,
+                "tenor_days": int(tenor_days),
+                "strike": float(q.strike),
+                "moneyness": float(q.strike / s),
                 "right": q.right,
-                "mark": q.mark,
-                "iv": sigma,
-                "open_interest": q.open_interest,
+                "mark": float(q.mark),
+                "iv": float(sigma),
+                "open_interest": None if q.open_interest is None else int(q.open_interest),
             })
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return df
-        df.sort_values(["tenor_days", "strike"], inplace=True)
-        return df
+        rows.sort(key=lambda r: (r["tenor_days"], r["strike"]))
+        return rows
 
-    def save_surface(self, df: pd.DataFrame, out_path: str) -> None:
-        if df.empty:
+    def save_surface_rows(self, rows: List[Dict[str, Any]], out_path: str) -> None:
+        if not rows:
             return
-        # Partition by date for efficient time series access
-        df.to_parquet(out_path, index=False)
+        # Define an explicit schema for stability
+        schema = pa.schema([
+            ("date", pa.date32()),
+            ("expiration", pa.date32()),
+            ("tenor_days", pa.int32()),
+            ("strike", pa.float64()),
+            ("moneyness", pa.float64()),
+            ("right", pa.string()),
+            ("mark", pa.float64()),
+            ("iv", pa.float64()),
+            ("open_interest", pa.int64()),
+        ])
+        # Convert date objects to date32 compatible by ensuring Python date
+        table = pa.Table.from_pylist(rows, schema=schema)
+        pq.write_table(table, out_path)
