@@ -1,0 +1,12 @@
+# Google API credentials (sensitive)
+credentials.json
+token.json
+
+# Environment
+.env
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+.venv/
